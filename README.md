@@ -36,7 +36,7 @@ POST /agent
         ├─ deterministic policy (src/decision.ts) → decision + reason_code
         ├─ snarkjs fullProve with gatekeeper.wasm / gatekeeper_final.zkey
         │    (skipped only for PROOF_REUSED — documented as having no proof)
-        ├─ Kurier submit + bounded poll (≤35 s) → finalized txHash as proof_tx
+        ├─ Kurier submit + bounded poll (≤15 s) → on-chain txHash as proof_tx
         └─ signed JSON response
 ```
 
@@ -136,7 +136,7 @@ task_id) mod p`, so a redelivered task reproduces identical proof inputs.
 | `KURIER_API_KEY` | no | Mainnet Kurier key. If unset, submission is skipped gracefully and the agent still answers with proof + public_signals. |
 | `KURIER_API_URL` | no | Default `https://api.kurier.xyz/api/v1` (mainnet). |
 | `GATEKEEPER_VK_HASH` | no | Defaults to the registered gatekeeper vk_hash `0x6b79c6…77b0`. |
-| `KURIER_POLL_BUDGET_MS` | no | Default 35000. Docs show finalization in ~16 s. |
+| `KURIER_POLL_BUDGET_MS` | no | Default 15000. Live measurement: txHash exists from the Submitted status (~4 s); full finalization takes ~27 s and continues server-side at Kurier after we stop polling. |
 | `TASK_SOFT_DEADLINE_MS` | no | Default 50000 (hard platform deadline is 60 s). |
 | `SEEN_STORE_PATH` | no | Default `data/seen.json` locally, `/tmp/…` on Vercel. |
 | `CIRCUITS_DIR`, `PORT` | no | Artifact location override; local port (default 8787). |
@@ -171,7 +171,7 @@ ships blank values.
   (PROOF_REUSED correctly carries no proof)
 - Idempotent redelivery (cached response, not misread as reuse)
 - Response times: ~1.27 s cold (incl. WASM load), ~0.29–0.39 s warm — far
-  under the 60 s deadline even with the 35 s Kurier budget on top
+  under the 60 s deadline even with the 15 s Kurier budget on top
 
 ## Deployment notes
 
@@ -192,8 +192,9 @@ ships blank values.
 - **"Finalized before approval"** (Security checklist): the envelope carries
   no independently checkable finality proof for the referenced on-chain
   proof, so this is implemented as: our own proof is submitted to Kurier and
-  its finalized `txHash` is returned as `proof_tx` whenever finalization
-  lands inside the budget.
+  its on-chain `txHash` is returned as `proof_tx` as soon as the submission
+  transaction exists (the Submitted status, ~4 s live); finalization itself
+  completes server-side at Kurier (~27 s live) without blocking the response.
 - **`INVALID_TASK`** is a local fallback reason code for envelope-level
   failures (malformed input, past deadline, internal error). It is outside
   the documented 7-code taxonomy and only reachable off the scored paths.

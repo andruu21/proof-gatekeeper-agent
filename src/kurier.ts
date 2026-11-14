@@ -12,7 +12,10 @@ import type { Groth16Proof } from "./types";
  *   -> { jobId, optimisticVerify }
  *   GET {KURIER_API_URL}/job-status/{KURIER_API_KEY}/{jobId}
  *   lifecycle: Queued -> Valid -> Submitted -> IncludedInBlock -> Finalized | Failed
- *   Finalized carries txHash, which the caller uses as the response proof_tx.
+ *   The txHash is already present from the Submitted status onward (measured
+ *   live 2026-11-15: txHash at ~4 s, Finalized at ~27 s), so polling returns
+ *   as soon as a txHash is known instead of blocking the task response on
+ *   finalization; the Kurier job keeps finalizing server-side regardless.
  *
  * The gatekeeper vk_hash is already registered on mainnet, so
  * vkRegistered: true and no register-vk call is needed.
@@ -64,6 +67,7 @@ export async function submitProofAndPoll(
     );
 
     let status = "Submitted";
+    let lastTxHash: string | undefined;
     while (Date.now() < deadline) {
       await sleep(Math.min(cfg.kurierPollIntervalMs, Math.max(0, deadline - Date.now())));
       const statusRes = await fetch(
@@ -80,15 +84,18 @@ export async function submitProofAndPoll(
       };
       status = s.status ?? status;
       const txHash = s.txHash ?? s.transactionInfo?.txHash;
-      if (status === "Finalized") {
-        return { jobId: job.jobId, status, txHash, finalized: true };
-      }
+      if (txHash) lastTxHash = txHash;
       if (status === "Failed") {
         return { jobId: job.jobId, status, txHash, finalized: false };
       }
+      if (txHash) {
+        // The on-chain transaction exists from Submitted onward; return its
+        // hash now and let finalization complete server-side at Kurier.
+        return { jobId: job.jobId, status, txHash, finalized: status === "Finalized" };
+      }
     }
-    console.log(`[kurier] job ${job.jobId} not finalized within budget (last status=${status})`);
-    return { jobId: job.jobId, status, finalized: false };
+    console.log(`[kurier] job ${job.jobId} produced no txHash within budget (last status=${status})`);
+    return { jobId: job.jobId, status, txHash: lastTxHash, finalized: false };
   } catch (err) {
     console.error("[kurier] submission error:", (err as Error).message);
     return null;

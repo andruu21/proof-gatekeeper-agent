@@ -145,7 +145,7 @@ export class AgentHandler {
           this.cfg.taskSoftDeadlineMs - (Date.now() - startedAt);
         const budget = Math.min(this.cfg.kurierPollBudgetMs, Math.max(0, remaining));
         const kurier = await submitProofAndPoll(this.cfg, proof, publicSignals, budget);
-        response.proof_tx = kurier?.finalized && kurier.txHash ? kurier.txHash : parsed.proofTx;
+        response.proof_tx = kurier?.txHash ? kurier.txHash : parsed.proofTx;
       } catch (err) {
         // Proving failed: fail closed. A claimed APPROVE without a valid
         // proof is the worst outcome, so downgrade to REJECT with no proof.
