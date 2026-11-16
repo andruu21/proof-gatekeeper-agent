@@ -54,7 +54,7 @@ generation failures all resolve to REJECT, never to an unproven APPROVE.
 | `src/decision.ts` | Deterministic policy + envelope→circuit field conversion. |
 | `src/prover.ts` | snarkjs `groth16.fullProve` wrapper. |
 | `src/kurier.ts` | Kurier submit-proof + job-status polling (never throws). |
-| `src/seenStore.ts` | proof_tx seen-set + response cache, JSON-file backed. |
+| `src/seenStore.ts` | proof_tx seen-set + response cache; memory + JSON file + optional shared Vercel Blob state. |
 | `circuits/` | `gatekeeper.wasm`, `gatekeeper_final.zkey`, `verification_key.json` (extracted from the zkey). |
 | `scripts/probe-signals.js` | Dev tool that recovered the circuit's input signal names from the WASM. |
 | `test/harness.ts` | Local end-to-end harness (`npm test`). |
@@ -118,7 +118,7 @@ currentBlock, recipient, conditionRecipient, amount, maxTransfer,
 decision, salt (private)
 ```
 
-and emits 13 public signals: `[Poseidon(taskId, salt), …the 12 public inputs
+and emits 13 public signals: `[Poseidon(salt, taskId), …the 12 public inputs
 in the order above…]`. Critically, the circuit **asserts
 `decision == (all five field checks)`**: witness generation fails for
 `decision=1` on a trapped statement and for `decision=0` on a valid one — the
@@ -139,6 +139,7 @@ task_id) mod p`, so a redelivered task reproduces identical proof inputs.
 | `KURIER_POLL_BUDGET_MS` | no | Default 15000. Live measurement: txHash exists from the Submitted status (~4 s); full finalization takes ~27 s and continues server-side at Kurier after we stop polling. |
 | `TASK_SOFT_DEADLINE_MS` | no | Default 50000 (hard platform deadline is 60 s). |
 | `SEEN_STORE_PATH` | no | Default `data/seen.json` locally, `/tmp/…` on Vercel. |
+| `BLOB_READ_WRITE_TOKEN` | no | When set, the seen-set is shared across instances via a private Vercel Blob document (`SEEN_BLOB_PATHNAME`, default `gatekeeper/seen-state.json`). Injected automatically when a Blob store is connected to the project. |
 | `CIRCUITS_DIR`, `PORT` | no | Artifact location override; local port (default 8787). |
 
 No secrets are hardcoded anywhere; `.env` is gitignored and `.env.example`
@@ -176,10 +177,13 @@ ships blank values.
 ## Deployment notes
 
 - **Seen-set durability:** the seen-set lives in process memory + a JSON
-  file. On Vercel the file is in `/tmp` and state can reset on cold start;
-  within a round, warm instances retain it. For maximum PROOF_REUSED
-  reliability across the 8 rounds, a single long-lived instance
-  (`npm start` on a small VM/container) is the safer host.
+  file, and — when `BLOB_READ_WRITE_TOKEN` is set (a private Vercel Blob
+  store connected to the project) — in a shared Blob document that is
+  merged in before each task and written back after recording. The Blob
+  layer is what makes the set survive Vercel's per-instance `/tmp` and
+  cold starts; without it, a PROOF_REUSED trap whose first use landed on
+  a different instance is missed (the leading suspect for R04's one
+  incorrect decision, 2026-11-16). Blob failures are logged, never fatal.
 - **Kurier costs/credits** are the operator's: every provable task submits
   one proof to zkVerify mainnet when a key is configured.
 
@@ -189,15 +193,22 @@ ships blank values.
   the algorithm/encoding. Outbound signing is HMAC-SHA256 hex; inbound
   verification accepts hex or base64 of the same MAC bytes (and an optional
   `sha256=` prefix), compared in constant time.
-- **"Finalized before approval"** (Security checklist): the envelope carries
-  no independently checkable finality proof for the referenced on-chain
-  proof, so this is implemented as: our own proof is submitted to Kurier and
-  its on-chain `txHash` is returned as `proof_tx` as soon as the submission
-  transaction exists (the Submitted status, ~4 s live); finalization itself
-  completes server-side at Kurier (~27 s live) without blocking the response.
+- **"Finalized before approval"** (Security checklist): our own proof is
+  submitted to Kurier and polling waits for the job to reach `Finalized`
+  before the response goes out (budget 40 s of the 60 s window; on budget
+  expiry the answer still goes out with the proof and the last known
+  txHash). This has been the behaviour since the R03 post-mortem: R03's
+  proofs were returned at the Submitted stage and the platform counted
+  0 of 8 as verified, while its dashboard labels the metric
+  "CONFIRMED ON-CHAIN".
 - **`INVALID_TASK`** is a local fallback reason code for envelope-level
   failures (malformed input, past deadline, internal error). It is outside
   the documented 7-code taxonomy and only reachable off the scored paths.
-- **task_id → field element:** free-form ids (e.g. `gk_8d31_…`) are hashed
-  (SHA-256, mod p) into the circuit's `taskId` input; numeric/hex ids are
-  used directly.
+- **task_id → field element:** free-form ids (e.g. `gk_8d31_…`) are encoded
+  as the integer of their raw UTF-8 bytes (big-endian, mod p); numeric/hex
+  ids are used directly. The encoding follows the worked example in
+  lince00/agent-games-gatekeeper (`gk_24_9d1` → `1907751597477446902833`,
+  reproduced as a fixed vector in the test harness). Earlier versions used
+  SHA-256 (R03, early R04) and then Keccak-256 (late R04); the platform's
+  verified counter stayed 0 under both, which is what prompted the switch
+  before R05 — see the comment on `toFieldElement` in `src/decision.ts`.

@@ -12,10 +12,14 @@ import type { Groth16Proof } from "./types";
  *   -> { jobId, optimisticVerify }
  *   GET {KURIER_API_URL}/job-status/{KURIER_API_KEY}/{jobId}
  *   lifecycle: Queued -> Valid -> Submitted -> IncludedInBlock -> Finalized | Failed
- *   The txHash is already present from the Submitted status onward (measured
- *   live 2026-11-15: txHash at ~4 s, Finalized at ~27 s), so polling returns
- *   as soon as a txHash is known instead of blocking the task response on
- *   finalization; the Kurier job keeps finalizing server-side regardless.
+ *   The txHash is present from the Submitted status onward (measured live
+ *   2026-11-15: txHash at ~4 s, Finalized at ~27 s). Polling nevertheless
+ *   waits for Finalized before returning: in scored round R03 (2026-11-15/16)
+ *   every decision was correct yet 0/8 proofs counted as verified and the
+ *   dashboard labels the metric "CONFIRMED ON-CHAIN", which fits the
+ *   platform confirming the proof_tx on-chain — a merely-Submitted tx is
+ *   not yet confirmed. Waiting costs ~30 s of the 60 s window; on budget
+ *   exhaustion the last known txHash is still returned as a fallback.
  *
  * The gatekeeper vk_hash is already registered on mainnet, so
  * vkRegistered: true and no register-vk call is needed.
@@ -86,15 +90,17 @@ export async function submitProofAndPoll(
       const txHash = s.txHash ?? s.transactionInfo?.txHash;
       if (txHash) lastTxHash = txHash;
       if (status === "Failed") {
-        return { jobId: job.jobId, status, txHash, finalized: false };
+        console.error(`[kurier] job ${job.jobId} FAILED on Kurier side`);
+        return { jobId: job.jobId, status, txHash: lastTxHash, finalized: false };
       }
-      if (txHash) {
-        // The on-chain transaction exists from Submitted onward; return its
-        // hash now and let finalization complete server-side at Kurier.
-        return { jobId: job.jobId, status, txHash, finalized: status === "Finalized" };
+      if (status === "Finalized") {
+        console.log(`[kurier] job ${job.jobId} FINALIZED tx=${lastTxHash ?? "n/a"}`);
+        return { jobId: job.jobId, status, txHash: lastTxHash, finalized: true };
       }
     }
-    console.log(`[kurier] job ${job.jobId} produced no txHash within budget (last status=${status})`);
+    console.log(
+      `[kurier] job ${job.jobId} not finalized within budget (last status=${status}, tx=${lastTxHash ?? "none"})`,
+    );
     return { jobId: job.jobId, status, txHash: lastTxHash, finalized: false };
   } catch (err) {
     console.error("[kurier] submission error:", (err as Error).message);

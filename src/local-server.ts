@@ -20,7 +20,15 @@ export function createAgentServer(): http.Server {
       "[agent] WARNING: AGENT_GAMES_HMAC_SECRET is not set — POSTs will fail with 500 until it is.",
     );
   }
-  const handler = new AgentHandler(cfg, new SeenStore(cfg.seenStorePath));
+  const handler = new AgentHandler(
+    cfg,
+    new SeenStore(
+      cfg.seenStorePath,
+      cfg.blobReadWriteToken
+        ? { token: cfg.blobReadWriteToken, pathname: cfg.seenBlobPathname }
+        : null,
+    ),
+  );
 
   return http.createServer((req, res) => {
     const url = new URL(req.url ?? "/", "http://localhost");

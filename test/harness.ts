@@ -77,7 +77,8 @@ function makeTask(taskId: string, overrides: Record<string, unknown> = {}): obje
 
 async function main(): Promise<void> {
   const { createAgentServer } = await import("../src/local-server");
-  const { signBody, verifyBodySignature } = await import("../src/hmac");
+  const { signBody, verifyBodySignature, BN128_PRIME } = await import("../src/hmac");
+  const { toFieldElement } = await import("../src/decision");
   const snarkjs = await import("snarkjs");
   const verificationKey = JSON.parse(
     fs.readFileSync(path.resolve(__dirname, "..", "circuits", "verification_key.json"), "utf8"),
@@ -114,6 +115,22 @@ async function main(): Promise<void> {
     check("tampered body rejected", !verifyBodySignature(TEST_SECRET, body + " ", hexSig));
     check("wrong secret rejected", !verifyBodySignature("other-secret", body, hexSig));
     check("missing header rejected", !verifyBodySignature(TEST_SECRET, body, undefined));
+  }
+
+  console.log("== Field encoding unit checks ==");
+  {
+    // Fixed vector from lince00/agent-games-gatekeeper: the documented
+    // worked example of the task_id -> field element encoding (raw UTF-8
+    // bytes as one big-endian integer).
+    check(
+      "task_id utf8-bytes vector",
+      toFieldElement("gk_24_9d1") === "1907751597477446902833",
+      toFieldElement("gk_24_9d1"),
+    );
+    check(
+      "hex vk hash reduces mod p",
+      toFieldElement(VK_HASH) === (BigInt(VK_HASH) % BN128_PRIME).toString(),
+    );
   }
 
   console.log("== Preflight ==");

@@ -1,4 +1,3 @@
-import * as crypto from "crypto";
 import { BN128_PRIME } from "./hmac";
 import type { Evaluation, GatekeeperInput, TaskEnvelope } from "./types";
 
@@ -122,6 +121,20 @@ export function evaluate(
  * Convert an envelope value to a BN128 field element (decimal string).
  * Hex values are reduced mod p (a 32-byte hash does not fit the field);
  * reduction preserves equality, which is all the circuit checks.
+ * Free-form strings (the task_id, e.g. "gk_24_9d1") are encoded as the
+ * integer of their raw UTF-8 bytes, big-endian. This is the encoding a
+ * fellow builder (lince00/agent-games-gatekeeper) documented with a
+ * worked example — "gk_24_9d1" -> 1907751597477446902833 — which the
+ * test harness reproduces as a fixed vector. History: R03 and the first
+ * R04 tasks used SHA-256 here (our own invention), mid-R04 switched to
+ * Keccak-256 (another builder's claim); the platform's verified counter
+ * stayed 0 across both rounds even though every decision scored correct
+ * and every proof verified locally, in practice, and on-chain. Of the
+ * 13 public signals, this is the one field the platform can recompute
+ * differently (the commitment depends on the private salt, so it cannot
+ * be recomputed platform-side). If the platform does not cross-check
+ * it, the encoding is inert (any field element proves). Adopted
+ * 2026-11-17, before R05.
  */
 export function toFieldElement(v: string | bigint): string {
   let n: bigint;
@@ -132,9 +145,10 @@ export function toFieldElement(v: string | bigint): string {
     if (/^0x[0-9a-fA-F]+$/.test(s)) n = BigInt(s);
     else if (/^[0-9]+$/.test(s)) n = BigInt(s);
     else {
-      // Free-form identifier (e.g. a task_id like "gk_8d31_x"): hash into the field.
-      const digest = crypto.createHash("sha256").update(s).digest();
-      n = BigInt("0x" + digest.toString("hex"));
+      // Free-form identifier (e.g. a task_id like "gk_8d31_x"): raw UTF-8
+      // bytes read as one big-endian integer.
+      const hex = Buffer.from(s, "utf8").toString("hex");
+      n = hex ? BigInt("0x" + hex) : 0n;
     }
   }
   const reduced = ((n % BN128_PRIME) + BN128_PRIME) % BN128_PRIME;
@@ -150,7 +164,10 @@ export function toFieldElement(v: string | bigint): string {
  *   public signals order: [commitment, registeredVkHash, proofVkHash,
  *           minimum, publicBalance, expiryBlock, currentBlock, recipient,
  *           conditionRecipient, amount, maxTransfer, decision, taskId]
- * where commitment = Poseidon(taskId, salt) is the circuit's only output.
+ * where commitment = Poseidon(salt, taskId) is the circuit's only output
+ * (argument order as independently reconstructed by other builders and
+ * confirmed against the witness; an earlier note here had it reversed,
+ * which never affected proving since the circuit computes it internally).
  */
 export function buildCircuitInputs(
   envelope: TaskEnvelope,

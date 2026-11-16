@@ -14,6 +14,10 @@ export interface Config {
   gatekeeperVkHash: string;
   circuitsDir: string;
   seenStorePath: string;
+  /** Vercel Blob read-write token; when set, the seen-store is shared across serverless instances. */
+  blobReadWriteToken: string | null;
+  /** Blob pathname of the shared seen-store state document. */
+  seenBlobPathname: string;
   /** Stop polling Kurier after this long; the response must stay well under the 60s deadline. */
   kurierPollBudgetMs: number;
   kurierPollIntervalMs: number;
@@ -51,7 +55,9 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
       "0x6b79c6012a6d8651f3e13bc4d2a20370280ab49700c90c5316d4168bfbad77b0",
     circuitsDir: env.CIRCUITS_DIR ?? defaultCircuitsDir(),
     seenStorePath: env.SEEN_STORE_PATH ?? defaultSeenStorePath(),
-    kurierPollBudgetMs: Number(env.KURIER_POLL_BUDGET_MS ?? 15_000),
+    blobReadWriteToken: env.BLOB_READ_WRITE_TOKEN ? env.BLOB_READ_WRITE_TOKEN : null,
+    seenBlobPathname: env.SEEN_BLOB_PATHNAME ?? "gatekeeper/seen-state.json",
+    kurierPollBudgetMs: Number(env.KURIER_POLL_BUDGET_MS ?? 40_000),
     kurierPollIntervalMs: Number(env.KURIER_POLL_INTERVAL_MS ?? 3_000),
     taskSoftDeadlineMs: Number(env.TASK_SOFT_DEADLINE_MS ?? 50_000),
     port: Number(env.PORT ?? 8787),

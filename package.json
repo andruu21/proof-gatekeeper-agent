@@ -10,13 +10,14 @@
     "serve": "node dist/src/local-server.js"
   },
   "dependencies": {
+    "@vercel/blob": "^2.9.0",
     "snarkjs": "^0.7.6"
   },
   "devDependencies": {
     "@types/node": "^26.6.6",
+    "circom_runtime": "^0.1.28",
     "tsx": "^4.23.15",
-    "typescript": "^5.6.3",
-    "circom_runtime": "^0.1.28"
+    "typescript": "^5.6.3"
   },
   "private": true,
   "engines": {

@@ -1,6 +1,6 @@
 import type { Config } from "./config";
 import { deriveSalt, signBody, verifyBodySignature } from "./hmac";
-import { buildCircuitInputs, evaluate, parseInput } from "./decision";
+import { buildCircuitInputs, evaluate, parseInput, toFieldElement } from "./decision";
 import { Prover } from "./prover";
 import { submitProofAndPoll } from "./kurier";
 import { SeenStore } from "./seenStore";
@@ -98,6 +98,11 @@ export class AgentHandler {
   }
 
   private async handleTask(task: TaskEnvelope, startedAt: number): Promise<HandlerResult> {
+    // Pull the shared seen-store state first (Vercel Blob when configured):
+    // on serverless, another instance may have recorded this task's
+    // proof_tx — or this very task's response — since this instance booted.
+    await this.store.hydrate();
+
     // Idempotent redelivery: answer from the cache, never re-evaluate
     // (a redelivery must not be mistaken for proof reuse).
     if (task.task_id) {
@@ -130,6 +135,7 @@ export class AgentHandler {
       reason_code: evaluation.reason_code,
     };
 
+    let kurierInfo = "none";
     if (evaluation.provable) {
       const salt = deriveSalt(this.cfg.hmacSecret, task.task_id);
       const circuitInputs = buildCircuitInputs(task, parsed, evaluation.decision, salt);
@@ -138,23 +144,32 @@ export class AgentHandler {
         response.proof = proof;
         response.public_signals = publicSignals;
 
-        // zkVerify submission via Kurier, bounded so the response stays well
-        // inside the 60s deadline. Never blocks the answer on finalization:
-        // on budget expiry we still return the proof + public_signals.
+        // zkVerify submission via Kurier. Since R03 (0/8 proofs counted as
+        // verified despite all-correct decisions; dashboard labels the
+        // metric "CONFIRMED ON-CHAIN"), polling waits for the job to reach
+        // Finalized before the response goes out, bounded by the soft
+        // deadline so the answer stays inside the 60s window. On budget
+        // expiry we still answer with the proof + public_signals and the
+        // last known txHash.
         const remaining =
           this.cfg.taskSoftDeadlineMs - (Date.now() - startedAt);
         const budget = Math.min(this.cfg.kurierPollBudgetMs, Math.max(0, remaining));
         const kurier = await submitProofAndPoll(this.cfg, proof, publicSignals, budget);
+        kurierInfo = kurier
+          ? `job=${kurier.jobId} status=${kurier.status} finalized=${kurier.finalized}`
+          : "submit_failed";
         response.proof_tx = kurier?.txHash ? kurier.txHash : parsed.proofTx;
       } catch (err) {
-        // Proving failed: fail closed. A claimed APPROVE without a valid
-        // proof is the worst outcome, so downgrade to REJECT with no proof.
+        // Proving or submission failed: still answer the decision, without
+        // a proof. Scoring charges a missing proof separately (-2), so a
+        // correct decision keeps most of its value; flipping an APPROVE
+        // into a REJECT (the pre-R05 behaviour) traded +12 for -3.
+        // proof_tx echoes the task's own reference, since this answer
+        // carries no submission of ours. If proving itself succeeded and
+        // only the Kurier step threw, the proof fields stay populated.
         console.error("[agent] proof generation failed:", (err as Error).message);
-        return this.signed(200, {
-          decision: "REJECT",
-          reason_code: evaluation.decision === "APPROVE" ? "INVALID_TASK" : evaluation.reason_code,
-          proof_tx: parsed.proofTx,
-        });
+        kurierInfo = "error";
+        response.proof_tx = parsed.proofTx;
       }
     } else {
       // PROOF_REUSED: documented as having no proof to submit; echo the
@@ -162,10 +177,16 @@ export class AgentHandler {
       response.proof_tx = parsed.proofTx;
     }
 
+    console.log(
+      `[task] id=${task.task_id} mode=${task.mode ?? "?"} decision=${response.decision} ` +
+        `reason=${response.reason_code} kurier=${kurierInfo} proof_tx=${response.proof_tx ?? "none"} ` +
+        `task_id_element=${toFieldElement(task.task_id)} elapsed_ms=${Date.now() - startedAt}`,
+    );
     const result = this.signed(200, response);
     // Record only after a successful evaluation, so a task never flags itself.
     this.store.recordProofTx(parsed.proofTx);
     this.store.recordResponse(task.task_id, result.body);
+    await this.store.flush();
     return result;
   }
 
