@@ -7,6 +7,19 @@ Groth16 proof locally with snarkjs against the official gatekeeper circuit,
 optionally submits it to zkVerify via Kurier, and returns a signed response —
 well inside the 60-second hard deadline (typical end-to-end: ~0.3–1.3 s).
 
+## R06 response-model experiment (2026-11-18)
+
+Rounds R03-R05 answered with the Kurier submission tx hash as `proof_tx`
+(polling to Finalized first). The dashboard Proof Verified counter stayed
+0/24 even though the submitted proofs verify on-chain (ProofVerified
+events on Subscan) and three task_id encodings were tried (SHA-256,
+Keccak-256, raw UTF-8). From R06 the agent instead echoes the task's own
+`proof_tx` reference and makes no Kurier submission, isolating the
+response model as the single changed variable. `src/kurier.ts` remains in
+the tree, unused, so the Kurier model can be restored by reverting the
+block in `src/handler.ts`. Proving, the raw UTF-8 task_id encoding, and
+the seen-store are unchanged.
+
 ## Deployment (as registered)
 
 Production endpoint: `https://zkverify-gatekeeper.vercel.app/agent`
@@ -36,7 +49,7 @@ POST /agent
         ├─ deterministic policy (src/decision.ts) → decision + reason_code
         ├─ snarkjs fullProve with gatekeeper.wasm / gatekeeper_final.zkey
         │    (skipped only for PROOF_REUSED — documented as having no proof)
-        ├─ Kurier submit + bounded poll (≤15 s) → on-chain txHash as proof_tx
+        ├─ proof_tx echoes the task's own reference (R06 echo model; no Kurier submit)
         └─ signed JSON response
 ```
 

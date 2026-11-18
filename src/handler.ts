@@ -2,7 +2,6 @@ import type { Config } from "./config";
 import { deriveSalt, signBody, verifyBodySignature } from "./hmac";
 import { buildCircuitInputs, evaluate, parseInput, toFieldElement } from "./decision";
 import { Prover } from "./prover";
-import { submitProofAndPoll } from "./kurier";
 import { SeenStore } from "./seenStore";
 import {
   PREFLIGHT_TYPE,
@@ -21,7 +20,8 @@ import {
  *   1. HMAC over the RAW body vs x-agent-games-signature — before JSON parsing.
  *   2. Preflight (type = agent-games.preflight.v1) -> signed { ok, protocolVersion }.
  *   3. Task: validate envelope + timestamps, deterministic policy evaluation,
- *      local Groth16 proof (except PROOF_REUSED), optional Kurier submission,
+ *      local Groth16 proof (except PROOF_REUSED), proof_tx echoing the
+ *      task's own reference (R06 echo model, no Kurier submission),
  *      signed response. Any error or uncertainty fails closed to REJECT.
  */
 export interface HandlerResult {
@@ -144,29 +144,24 @@ export class AgentHandler {
         response.proof = proof;
         response.public_signals = publicSignals;
 
-        // zkVerify submission via Kurier. Since R03 (0/8 proofs counted as
-        // verified despite all-correct decisions; dashboard labels the
-        // metric "CONFIRMED ON-CHAIN"), polling waits for the job to reach
-        // Finalized before the response goes out, bounded by the soft
-        // deadline so the answer stays inside the 60s window. On budget
-        // expiry we still answer with the proof + public_signals and the
-        // last known txHash.
-        const remaining =
-          this.cfg.taskSoftDeadlineMs - (Date.now() - startedAt);
-        const budget = Math.min(this.cfg.kurierPollBudgetMs, Math.max(0, remaining));
-        const kurier = await submitProofAndPoll(this.cfg, proof, publicSignals, budget);
-        kurierInfo = kurier
-          ? `job=${kurier.jobId} status=${kurier.status} finalized=${kurier.finalized}`
-          : "submit_failed";
-        response.proof_tx = kurier?.txHash ? kurier.txHash : parsed.proofTx;
+        // R06 experiment (approved by Andri 2026-11-18): echo model.
+        // R03-R05 answered with the Kurier submission tx hash as proof_tx
+        // and the dashboard Proof Verified counter never moved (0/24),
+        // even though the submitted proofs verify on-chain (ProofVerified
+        // events on Subscan). This build echoes the task's own proof_tx
+        // reference and makes NO Kurier submission, isolating the response
+        // model as the single changed variable: the task_id encoding stays
+        // raw UTF-8 and proving is unchanged. src/kurier.ts is kept in the
+        // tree so the Kurier model can be restored by reverting this block.
+        kurierInfo = "echo_model";
+        response.proof_tx = parsed.proofTx;
       } catch (err) {
-        // Proving or submission failed: still answer the decision, without
-        // a proof. Scoring charges a missing proof separately (-2), so a
-        // correct decision keeps most of its value; flipping an APPROVE
-        // into a REJECT (the pre-R05 behaviour) traded +12 for -3.
+        // Proving failed: still answer the decision, without a proof.
+        // Scoring charges a missing proof separately (-2), so a correct
+        // decision keeps most of its value; flipping an APPROVE into a
+        // REJECT (the pre-R05 behaviour) traded +12 for -3.
         // proof_tx echoes the task's own reference, since this answer
-        // carries no submission of ours. If proving itself succeeded and
-        // only the Kurier step threw, the proof fields stay populated.
+        // carries no submission of ours.
         console.error("[agent] proof generation failed:", (err as Error).message);
         kurierInfo = "error";
         response.proof_tx = parsed.proofTx;
